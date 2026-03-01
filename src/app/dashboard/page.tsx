@@ -2,6 +2,8 @@
 
 import { useState, useEffect, useRef } from "react";
 
+const READ_STORAGE_KEY = "dashboard_inbox_read_ids";
+
 interface Sms {
   _id: string;
   mobileNumber: string;
@@ -32,6 +34,11 @@ export default function DashboardPage() {
   const [showFailedPopup, setShowFailedPopup] = useState(false);
   const isFirstLoad = useRef(true);
   const previousFailedCount = useRef(0);
+
+  const saveReadIds = (ids: Set<string>) => {
+    if (typeof window === "undefined") return;
+    localStorage.setItem(READ_STORAGE_KEY, JSON.stringify(Array.from(ids)));
+  };
 
   /* ================= FETCH FUNCTIONS ================= */
 
@@ -82,6 +89,47 @@ export default function DashboardPage() {
     return () => clearInterval(interval);
   }, []);
 
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    try {
+      const stored = localStorage.getItem(READ_STORAGE_KEY);
+      if (stored) {
+        const parsed = JSON.parse(stored);
+        if (Array.isArray(parsed)) {
+          setReadInboxIds(new Set(parsed));
+        }
+      }
+    } catch {
+      localStorage.removeItem(READ_STORAGE_KEY);
+    }
+  }, [READ_STORAGE_KEY]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    if (!inboxList.length) return;
+    setReadInboxIds((prev) => {
+      if (!prev.size) return prev;
+      const valid = new Set<string>();
+      inboxList.forEach((msg) => {
+        if (prev.has(msg._id)) {
+          valid.add(msg._id);
+        }
+      });
+      let unchanged = prev.size === valid.size;
+      if (unchanged) {
+        for (const id of prev) {
+          if (!valid.has(id)) {
+            unchanged = false;
+            break;
+          }
+        }
+      }
+      if (unchanged) return prev;
+      saveReadIds(valid);
+      return valid;
+    });
+  }, [inboxList]);
+
   /* ================= SEND SMS ================= */
 
   const handleSendSms = async (e: React.FormEvent) => {
@@ -123,6 +171,55 @@ export default function DashboardPage() {
       window.location.replace("/login");
     }
   };
+
+  const handleDeleteInbox = async (id: string) => {
+    if (!window.confirm("Delete this inbox message?")) return;
+    try {
+      const res = await fetch(`/api/admin/inbox?id=${id}`, { method: "DELETE" });
+      if (res.ok) {
+        setInboxList((prev) => prev.filter((msg) => msg._id !== id));
+        setReadInboxIds((prev) => {
+          if (!prev.has(id)) return prev;
+          const next = new Set(prev);
+          next.delete(id);
+          saveReadIds(next);
+          return next;
+        });
+      }
+    } catch (error) {
+      console.error("Failed to delete inbox SMS", error);
+    }
+  };
+
+  const markInboxAsRead = (id: string) => {
+    setReadInboxIds((prev) => {
+      if (prev.has(id)) return prev;
+      const next = new Set(prev);
+      next.add(id);
+      saveReadIds(next);
+      return next;
+    });
+  };
+
+  const handleInboxRowClick = (msg: InboxSms) => {
+    setSelectedInbox(msg);
+    markInboxAsRead(msg._id);
+  };
+
+  const formatFullDate = (value: string) =>
+    new Date(value).toLocaleString("en-GB", {
+      weekday: "long",
+      day: "numeric",
+      month: "long",
+      year: "numeric",
+    });
+
+  const formatExactTime = (value: string) =>
+    new Date(value).toLocaleTimeString("en-GB", {
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+    });
 
   /* ================= SIDEBAR STYLE ================= */
 
@@ -312,6 +409,7 @@ export default function DashboardPage() {
                       <th className="px-6 py-4">Sender</th>
                       <th className="px-6 py-4">Message Content</th>
                       <th className="px-6 py-4 text-right">Received Time</th>
+                      <th className="px-6 py-4 text-center">Action</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-50">
@@ -319,19 +417,30 @@ export default function DashboardPage() {
                       <tr
                         key={msg._id}
                         className={`transition cursor-pointer ${readInboxIds.has(msg._id) ? "hover:bg-slate-50" : "bg-indigo-50/40 hover:bg-indigo-50"}`}
-                        onClick={() => {
-                          setSelectedInbox(msg);
-                          setReadInboxIds((prev) => {
-                            const next = new Set(prev);
-                            next.add(msg._id);
-                            return next;
-                          });
-                        }}
+                        onClick={() => handleInboxRowClick(msg)}
                       >
                         <td className={`px-6 py-4 text-sm ${readInboxIds.has(msg._id) ? "font-medium text-slate-700" : "font-bold text-slate-800"}`}>{msg.sender}</td>
-                        <td className={`px-6 py-4 text-sm ${readInboxIds.has(msg._id) ? "text-slate-600" : "text-slate-800"}`}>{msg.message}</td>
+                        <td
+                          className={`px-6 py-4 text-sm ${readInboxIds.has(msg._id) ? "text-slate-600" : "text-slate-800"} whitespace-pre-wrap break-words`}
+                        >
+                          {msg.message}
+                        </td>
                         <td className="px-6 py-4 text-[10px] text-slate-400 text-right">
                           {new Date(msg.createdAt).toLocaleString()}
+                        </td>
+                        <td className="px-6 py-4 text-center">
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handleDeleteInbox(msg._id);
+                            }}
+                            className="text-slate-300 hover:text-red-500 transition"
+                            aria-label="Delete inbox SMS"
+                          >
+                            <svg className="w-4 h-4 mx-auto" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                            </svg>
+                          </button>
                         </td>
                       </tr>
                     ))}
@@ -359,25 +468,40 @@ export default function DashboardPage() {
               className="bg-white rounded-3xl p-6 md:p-8 w-full max-w-lg shadow-2xl relative"
               onClick={(e) => e.stopPropagation()}
             >
-              <div className="flex justify-between items-start mb-4">
-                <div>
-                  <p className="text-xs uppercase tracking-wide text-slate-400">Sender</p>
-                  <h3 className="text-xl font-bold text-slate-800">{selectedInbox.sender}</h3>
+              <div className="space-y-6">
+                <div className="flex items-center gap-4 bg-indigo-50 border border-indigo-100 rounded-2xl p-4">
+                  <div className="w-12 h-12 rounded-full bg-indigo-600 text-white font-semibold flex items-center justify-center">
+                    {selectedInbox.sender.slice(-2)}
+                  </div>
+                  <div>
+                    <p className="text-xs uppercase tracking-wide text-indigo-500">Contact</p>
+                    <h3 className="text-xl font-bold text-slate-900">{selectedInbox.sender}</h3>
+                    <p className="text-xs text-slate-500">Message ID • {selectedInbox._id.slice(-6)}</p>
+                  </div>
                 </div>
-              </div>
-              <div className="mb-6">
-                <p className="text-xs uppercase tracking-wide text-slate-400 mb-1">Message</p>
-                <p className="text-slate-700 whitespace-pre-wrap leading-relaxed">{selectedInbox.message}</p>
-              </div>
-              <div className="flex items-center justify-between text-sm text-slate-500">
-                <div>
-                  <p className="text-xs uppercase tracking-wide text-slate-400">Received</p>
-                  <p>{new Date(selectedInbox.createdAt).toLocaleString()}</p>
-                </div>
-                <div className="text-indigo-600 font-semibold">Inbox</div>
-              </div>
 
-              <div className="mt-6">
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                  <div className="rounded-2xl border border-slate-100 bg-slate-50 p-4">
+                    <p className="text-xs uppercase tracking-wide text-slate-400 mb-1">Received Date</p>
+                    <p className="text-slate-800 font-semibold">{formatFullDate(selectedInbox.createdAt)}</p>
+                  </div>
+                  <div className="rounded-2xl border border-slate-100 bg-slate-50 p-4">
+                    <p className="text-xs uppercase tracking-wide text-slate-400 mb-1">Exact Time</p>
+                    <div className="flex items-center gap-2 text-slate-800 font-semibold">
+                      <svg className="w-4 h-4 text-indigo-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
+                      </svg>
+                      {formatExactTime(selectedInbox.createdAt)}
+                    </div>
+                    <p className="text-[11px] text-slate-500 mt-1">Local server time</p>
+                  </div>
+                </div>
+
+                <div className="rounded-2xl border border-slate-100 bg-white p-5 shadow-sm">
+                  <p className="text-xs uppercase tracking-wide text-slate-400 mb-2">Message Content</p>
+                  <p className="text-slate-700 whitespace-pre-wrap break-words leading-relaxed">{selectedInbox.message}</p>
+                </div>
+
                 <button
                   onClick={() => setSelectedInbox(null)}
                   className="w-full py-3 rounded-xl bg-slate-900 text-white font-semibold hover:bg-slate-800 transition-colors"

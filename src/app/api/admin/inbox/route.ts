@@ -72,6 +72,20 @@ export async function POST(req: NextRequest) {
           sender: sender,
           message: message
         });
+
+        // Keep only latest 15 inbox entries to avoid unlimited growth
+        const totalCount = await InboxSms.countDocuments();
+        if (totalCount > 15) {
+          const overflow = totalCount - 15;
+          const oldest = await InboxSms.find({})
+            .sort({ createdAt: 1 })
+            .limit(overflow)
+            .select("_id");
+          const idsToRemove = oldest.map((doc) => doc._id);
+          if (idsToRemove.length) {
+            await InboxSms.deleteMany({ _id: { $in: idsToRemove } });
+          }
+        }
         console.log(`Incoming SMS saved successfully from: ${sender}`);
         return NextResponse.json({ success: true }, { status: 201 });
       } catch (dbError) {
@@ -83,6 +97,28 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ success: false, error: "Invalid action parameter" }, { status: 400 });
   } catch (error) {
     console.error("API /admin/inbox POST Error:", error);
+    return NextResponse.json({ success: false, error: "Server Error" }, { status: 500 });
+  }
+}
+
+export async function DELETE(req: NextRequest) {
+  try {
+    if (!isAuthorized(req)) {
+      return NextResponse.json({ success: false, error: "Unauthorized" }, { status: 401 });
+    }
+
+    const { searchParams } = new URL(req.url);
+    const id = searchParams.get("id");
+
+    if (!id) {
+      return NextResponse.json({ success: false, error: "Inbox ID is required" }, { status: 400 });
+    }
+
+    await dbConnect();
+    await InboxSms.findByIdAndDelete(id);
+    return NextResponse.json({ success: true, message: "Inbox SMS deleted" }, { status: 200 });
+  } catch (error) {
+    console.error("API /admin/inbox DELETE Error:", error);
     return NextResponse.json({ success: false, error: "Server Error" }, { status: 500 });
   }
 }
