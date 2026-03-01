@@ -1,84 +1,88 @@
 import { NextRequest, NextResponse } from "next/server";
 import dbConnect from "@/lib/mongodb";
-import SmsQueue from "@/models/SmsQueue";
+import mongoose from "mongoose";
 
-// Security Check: Verify the Secret Key from Android App
-const authenticate = (req: NextRequest) => {
-  const authHeader = req.headers.get("authorization");
-  const secret = process.env.API_SECRET;
-  
-  if (!authHeader || !authHeader.startsWith("Bearer ") || authHeader.split(" ")[1] !== secret) {
-    return false;
-  }
-  return true;
-};
+// --- Outgoing SMS Schema (MUST MATCH DASHBOARD: SmsQueue) ---
+const SmsSchema = new mongoose.Schema({
+  mobileNumber: String,
+  message: String,
+  status: { type: String, default: "pending" },
+}, { timestamps: true });
 
-// Handle GET requests (App fetching pending SMS)
+const SmsQueue = mongoose.models.SmsQueue || mongoose.model("SmsQueue", SmsSchema);
+
+// --- Incoming SMS Schema (Inbox) ---
+const InboxSchema = new mongoose.Schema({
+  sender: { type: String, required: true },
+  message: { type: String, required: true },
+}, { timestamps: true });
+
+const InboxSms = mongoose.models.InboxSms || mongoose.model("InboxSms", InboxSchema);
+
+const API_SECRET = "TanvirRahmanMahin8268@";
+
 export async function GET(req: NextRequest) {
-  if (!authenticate(req)) {
-    return NextResponse.json({ error: "Unauthorized access" }, { status: 401 });
-  }
+  try {
+    const url = new URL(req.url);
+    const action = url.searchParams.get("action");
+    const authHeader = req.headers.get("Authorization");
 
-  const { searchParams } = new URL(req.url);
-  const action = searchParams.get("action");
-
-  await dbConnect();
-
-  if (action === "fetch") {
-    try {
-      // Find the oldest pending SMS
-      const pendingSms = await SmsQueue.findOne({ status: "pending" }).sort({ createdAt: 1 });
-      
-      if (!pendingSms) {
-        return NextResponse.json({ data: null }, { status: 200 });
-      }
-
-      return NextResponse.json({ data: pendingSms }, { status: 200 });
-    } catch (error) {
-      return NextResponse.json({ error: "Failed to fetch SMS" }, { status: 500 });
+    if (authHeader !== `Bearer ${API_SECRET}`) {
+      return NextResponse.json({ success: false, error: "Unauthorized" }, { status: 401 });
     }
-  }
 
-  return NextResponse.json({ error: "Invalid action" }, { status: 400 });
+    await dbConnect(); 
+
+    if (action === "fetch") {
+      const pendingSms = await SmsQueue.findOne({ status: "pending" }).sort({ createdAt: 1 });
+      return NextResponse.json({ success: true, data: pendingSms || null }, { status: 200 });
+    }
+
+    return NextResponse.json({ success: false, error: "Invalid action" }, { status: 400 });
+  } catch (error) {
+    return NextResponse.json({ success: false, error: "Server Error" }, { status: 500 });
+  }
 }
 
-// Handle POST requests (App updating SMS status)
 export async function POST(req: NextRequest) {
-  if (!authenticate(req)) {
-    return NextResponse.json({ error: "Unauthorized access" }, { status: 401 });
-  }
+  try {
+    const url = new URL(req.url);
+    const action = url.searchParams.get("action");
+    const authHeader = req.headers.get("Authorization");
 
-  const { searchParams } = new URL(req.url);
-  const action = searchParams.get("action");
-
-  await dbConnect();
-
-  if (action === "update") {
-    try {
-      const body = await req.json();
-      const { id, status } = body;
-
-      if (!id || !status) {
-        return NextResponse.json({ error: "Missing SMS id or status" }, { status: 400 });
-      }
-
-      const updateData: any = { status };
-      
-      if (status === "sent") {
-        updateData.sentAt = new Date();
-      }
-
-      const updatedSms = await SmsQueue.findByIdAndUpdate(id, updateData, { new: true });
-
-      if (!updatedSms) {
-        return NextResponse.json({ error: "SMS not found in database" }, { status: 404 });
-      }
-
-      return NextResponse.json({ success: true, data: updatedSms }, { status: 200 });
-    } catch (error) {
-      return NextResponse.json({ error: "Failed to update SMS status" }, { status: 500 });
+    if (authHeader !== `Bearer ${API_SECRET}`) {
+      return NextResponse.json({ success: false, error: "Unauthorized" }, { status: 401 });
     }
-  }
 
-  return NextResponse.json({ error: "Invalid action" }, { status: 400 });
+    await dbConnect(); 
+    const body = await req.json().catch(() => ({})); // Safe JSON parsing
+
+    // 1. Handle Status Update
+    if (action === "update") {
+      const { id, status } = body;
+      if (!id || !status) return NextResponse.json({ success: false, error: "Missing data" }, { status: 400 });
+      await SmsQueue.findByIdAndUpdate(id, { status });
+      return NextResponse.json({ success: true });
+    }
+
+    // 2. Handle Incoming SMS (Inbox)
+    if (action === "receive") {
+      const senderNumber = body.sender || body.mobileNumber;
+      const smsText = body.message || body.text;
+
+      if (!senderNumber || !smsText) {
+        console.error("❌ Inbox Error - Missing fields:", body);
+        return NextResponse.json({ success: false, error: "Missing fields" }, { status: 400 });
+      }
+
+      await InboxSms.create({ sender: senderNumber, message: smsText });
+      console.log(`✅ Magic! Incoming SMS saved from: ${senderNumber}`);
+      return NextResponse.json({ success: true }, { status: 201 });
+    }
+
+    return NextResponse.json({ success: false, error: "Invalid action" }, { status: 400 });
+  } catch (error) {
+    console.error("API POST Error:", error);
+    return NextResponse.json({ success: false, error: "Server Error" }, { status: 500 });
+  }
 }
